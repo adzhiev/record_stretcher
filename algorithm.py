@@ -56,14 +56,14 @@ class RecordStretcher:
     @staticmethod
     def fusion_frames(frames_matrix, hop):
         number_frames, size_frames = frames_matrix.shape
-
         # Define an empty vector to receive result
         result = np.zeros((number_frames - 1) * hop + size_frames)
 
-        for i in range(number_frames - 1):
-            result[i * hop:(i + 1) * hop] = frames_matrix[i, :hop]
+        time_index = 0
 
-        result[(i + 1) * hop:] = frames_matrix[number_frames - 1, :]
+        for i in range(number_frames):
+            result[time_index:time_index + size_frames] += frames_matrix[i, :]
+            time_index += hop
 
         return result
 
@@ -75,8 +75,8 @@ class RecordStretcher:
         # Hanning window
         wn = np.hanning(window_size)
 
-        # add zeros at the end
-        x = np.concatenate((self.samples, np.zeros(3 * hop)))
+        # add zeros at the beginning
+        x = np.concatenate((np.zeros(3 * hop), self.samples))
 
         ### INITIALIZATION ###
 
@@ -87,13 +87,13 @@ class RecordStretcher:
         number_frames_output = number_frames_input
         output_y = np.zeros((number_frames_output, window_size))
 
-        # Initialize cumulative phase
-        phase_cumulative = np.zeros(window_size)
+        # Initialize synthesis phase
+        synthesis_phase = np.zeros(window_size)
 
-        # Initialize previous frame phase
-        previous_phase = np.zeros(window_size)
+        # Initialize previous frame analysis phase
+        previous_analysis_phase = np.zeros(window_size)
 
-        expected_phase = hop * 2 * np.pi * np.linspace(0, 1, window_size)
+        omega_bin = self.framerate * np.arange(window_size) / window_size
 
         for i in range(number_frames_input):
             ### ANALYSIS ###
@@ -101,7 +101,7 @@ class RecordStretcher:
             current_frame = y[i, :]
 
             # Window the frame
-            current_frame_windowed = current_frame * wn / np.sqrt(((window_size / hop) / 2))
+            current_frame_windowed = current_frame * wn
 
             # Get the FFT
             current_frame_windowed_fft = np.fft.fft(current_frame_windowed)
@@ -110,35 +110,31 @@ class RecordStretcher:
             mag_frame = np.abs(current_frame_windowed_fft)
 
             # Get the angle
-            phase_frame = np.angle(current_frame_windowed_fft)
+            analysis_phase = np.angle(current_frame_windowed_fft)
 
             ### PROCESSING ###
             # Get the phase difference
-            delta_phi = phase_frame - previous_phase
-            previous_phase = phase_frame
+            delta_analysis_phase = analysis_phase - previous_analysis_phase
+            previous_analysis_phase = analysis_phase
 
             # Remove the expected phase difference
-            delta_phi_prime = delta_phi - expected_phase
+            delta_omega = self.framerate * delta_analysis_phase / hop - omega_bin
 
             # Map to -pi/pi range
-            delta_phi_prime_mod = np.mod(delta_phi_prime + np.pi, 2 * np.pi) - np.pi
+            delta_omega_wrapped = np.mod(delta_omega + np.pi, 2 * np.pi) - np.pi
 
             # Get the true frequency
-            true_freq = 2 * np.pi * np.linspace(0, 1, window_size) + delta_phi_prime_mod / hop
+            omega_true = omega_bin + delta_omega_wrapped
 
             # Get the final phase
-            phase_cumulative += hop_out * true_freq
+            synthesis_phase += hop_out * omega_true / self.framerate
 
             ### SYNTHESIS ###
-            # Get the magnitude
-            output_mag = mag_frame
-
             # Produce output frame
-            output_frame = np.real(np.fft.ifft(output_mag * np.exp(1j * phase_cumulative)))
+            output_frame = np.real(np.fft.ifft(mag_frame * np.exp(1j * synthesis_phase)))
 
             # Save frame that has been processed
-            output_y[i, :] = output_frame * wn / np.sqrt(((window_size / hop_out) / 2))
-
+            output_y[i, :] = output_frame * wn
         # Collect frames
         stretched_record = RecordStretcher.fusion_frames(output_y, hop_out)
         stretched_record = stretched_record.astype(self.dtype)
